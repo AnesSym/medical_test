@@ -3,7 +3,6 @@ from groq import Groq
 import os
 import pandas as pd
 from datetime import datetime
-from st_aggrid import AgGrid, GridOptionsBuilder
 from io import BytesIO
 
 
@@ -521,7 +520,7 @@ def main():
     st.set_page_config(
         page_title="ASA Medical Assistant",
         page_icon="🏥",
-        layout="wide",
+        layout="centered",
         initial_sidebar_state="collapsed"  # This hides the sidebar by default
     )
     
