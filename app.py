@@ -21,10 +21,30 @@ from reportlab.platypus import (
 
 # Load environment variables
 
-# Initialize Groq client with API key from environment
-client = Groq(api_key="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")
+# Initialize list of API keys
+API_KEYS = [
+    "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",
+    "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",
+    "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"
+]
+
+# Add key rotation counter to session state
+if "api_key_index" not in st.session_state:
+    st.session_state.api_key_index = 0
+
+def get_next_api_key():
+    """Rotate through API keys"""
+    current_key = API_KEYS[st.session_state.api_key_index]
+    st.session_state.api_key_index = (st.session_state.api_key_index + 1) % len(API_KEYS)
+    return current_key
+
+# Replace the static client initialization with a function
+def get_groq_client():
+    """Get Groq client with next API key"""
+    return Groq(api_key=get_next_api_key())
 
 def get_assistant_response(prompt, chat_history):
+    client = get_groq_client()  # Get client with next API key
     # Prepare messages including chat history
     messages = [
         {"role": "system", "content": "You are a helpful and knowledgeable Medical assistant."}
@@ -136,6 +156,7 @@ def create_patient_intake_form():
     return None
 
 def get_diagnostic_analysis(patient_data):
+    client = get_groq_client()  # Get client with next API key
     # Prepare a comprehensive prompt for the LLM
     prompt = f"""As a medical AI assistant, please analyze the following patient information and provide 
 potential diagnoses and recommendations.
@@ -232,6 +253,7 @@ Generated via Medical Assistant System
     return report
 
 def get_medical_assistant_response(prompt, chat_history, patient_data=None):
+    client = get_groq_client()  # Get client with next API key
     # Updated system prompt to follow the specified workflow
     system_prompt = (
         "You are an advanced medical AI triage assistant for ASA bolnica in Bosnia and Herzegovina. "
@@ -472,6 +494,7 @@ def generate_pdf_report(patient_data, analysis):
     return pdf_data
 
 def get_special_response(prompt_type, chat_history):
+    client = get_groq_client()  # Get client with next API key
     """Handle special response types like clinical reasoning and medical literature"""
     
     special_prompts = {
