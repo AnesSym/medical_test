@@ -4,6 +4,10 @@ import os
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
+import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 # ReportLab imports for PDF generation
@@ -254,47 +258,58 @@ Generated via Medical Assistant System
 
 def get_medical_assistant_response(prompt, chat_history, patient_data=None):
     client = get_groq_client()  # Get client with next API key
-    # Updated system prompt to follow the specified workflow
+    # Updated system prompt with focus only on triage and department referral
     system_prompt = (
         "You are an advanced medical AI triage assistant for ASA bolnica in Bosnia and Herzegovina. "
         "Your role is to help patients with their initial medical inquiries and direct them "
         "to the appropriate departments within ASA bolnica. "
         "Keep your responses short, clear, and well-structured.\n\n"
+        
         "When gathering information, format your response like this:\n\n"
         "**Reported Symptoms:**\n"
         "• [Symptom] - [Duration] - [Severity]\n"
         "• [Symptom] - [Duration] - [Severity]\n\n"
         "**Additional Information Needed:**\n"
         "[List your follow-up questions here]\n\n"
+        
+        "CRITICAL SCREENING QUESTIONS - Include these when relevant:\n"
+        "• \"Is this the worst headache of your life?\" (Critical for brain hemorrhage detection)\n"
+        "• \"Any new rash, bullseye marks, or purple spots?\" (For infectious or allergic conditions)\n"
+        "• \"Any weakness, numbness, or trouble speaking?\" (For stroke or neurological conditions)\n"
+        "• \"Have you experienced these symptoms before?\" (To distinguish new vs. chronic conditions)\n"
+        "• \"Does medication relieve your symptoms?\" (To assess severity and treatment response)\n"
+        "• \"Any recent travel or tick exposure?\" (For infectious disease risk)\n\n"
+        
         "Only when you have gathered ALL necessary information about the symptoms, "
         "provide your final response in this format:\n\n"
         "**Reported Symptoms:**\n"
         "• [Symptom] - [Duration] - [Severity]\n"
         "• [Symptom] - [Duration] - [Severity]\n\n"
+        "**Red Flags Identified:**\n"
+        "[List any truly concerning features requiring urgent attention, or 'None' if no red flags]\n\n"
         "**Recommendation:**\n"
-        "[Your referral recommendation to specific ASA bolnica department]\n\n"
+        "[Simply state which department at ASA bolnica would be appropriate]\n\n"
         "---\n"
-        "**Summary**\n\n"
-        "**Key Symptoms:**\n"
-        "[List main symptoms]\n\n"
-        "**Recommended Department/Specialist:**\n"
-        "[Department at ASA bolnica]\n\n"
         "**Urgency Level:**\n"
-        "[Choose one of the following:]\n"
-        "- Immediate (Emergency Room visit needed now)\n"
-        "- Very Soon (Within 24 hours)\n"
-        "- Priority (Within 2-3 days)\n"
-        "- Standard (Within 1-2 weeks)\n"
-        "- Routine (Next available appointment)\n"
+        "• EMERGENCY: Seek immediate emergency care (only for truly life-threatening conditions)\n"
+        "• URGENT: Seek medical attention within 24 hours\n"
+        "• STANDARD: Schedule an appointment within 1-2 weeks\n"
+        "• ROUTINE: Next available regular appointment\n"
         "---\n\n"
+        
         "Important guidelines:\n"
-        "1. Do NOT show the summary section until you have gathered all necessary information\n"
-        "2. While gathering information, only show Reported Symptoms and Additional Information Needed\n"
-        "3. Keep responses concise and professional\n"
-        "4. Do not provide diagnosis - only referral recommendations to ASA bolnica departments\n"
-        "5. Use bullet points (•) for listing symptoms\n"
-        "6. Always ask follow-up questions if information is incomplete\n"
-        "7. Remember you are representing ASA bolnica in Bosnia and Herzegovina"
+        "1. BE CONSERVATIVE WITH URGENCY LEVELS - Do not over-triage common symptoms\n"
+        "2. For common issues like neck pain, headache, minor joint pain, or mild symptoms, use STANDARD or ROUTINE levels\n"
+        "3. Reserve URGENT only for significant symptoms like persistent high fever, severe pain, etc.\n"
+        "4. Reserve EMERGENCY only for truly life-threatening situations (stroke symptoms, severe breathing difficulty, etc.)\n"
+        "5. DO NOT offer any diagnosis or suggest potential medical concerns - this is the doctor's role\n"
+        "6. Only recommend department referral and urgency level\n"
+        "7. Do not suggest hospital visits for common issues like muscle pain from poor sleep\n"
+        "8. For musculoskeletal pain without red flags, recommend ROUTINE appointments\n"
+        "9. Keep responses concise and professional\n"
+        "10. Do not provide diagnosis - only department referrals\n"
+        "11. Use bullet points (•) for listing symptoms\n"
+        "12. Remember you are representing ASA bolnica in Bosnia and Herzegovina"
     )
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -538,13 +553,61 @@ def get_special_response(prompt_type, chat_history):
         stream=True
     )
 
+def send_feedback_email(chat_history, feedback_text):
+    """Send feedback via email"""
+    # Email configuration
+    sender_email = os.getenv('FEEDBACK_EMAIL')
+    sender_password = os.getenv('FEEDBACK_EMAIL_PASSWORD')
+    receiver_email = os.getenv('FEEDBACK_EMAIL')  # Same as sender in this case
+    
+    if not all([sender_email, sender_password, receiver_email]):
+        st.error("Email configuration is missing. Please check environment variables.")
+        return False
+        
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = receiver_email
+        msg['Subject'] = f"Medical Assistant Feedback - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # Format the chat history
+        chat_summary = "\n".join([
+            f"User: {msg.get('user', '')}\nAssistant: {msg.get('assistant', '')}"
+            for msg in chat_history
+        ])
+        
+        # Create email body
+        body = f"""
+New Feedback Received:
+
+Feedback:
+{feedback_text}
+
+Chat History:
+{chat_summary}
+        """
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Create SMTP session
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+            
+        return True
+    except Exception as e:
+        st.error(f"Error sending feedback: {str(e)}")
+        return False
+
 def main():
-    # Set page config with no sidebar
+    # Set page config
     st.set_page_config(
         page_title="ASA Medical Assistant",
         page_icon="🏥",
-        layout="centered",
-        initial_sidebar_state="collapsed"  # This hides the sidebar by default
+        layout="centered",  # Back to centered layout
+        initial_sidebar_state="expanded"
     )
     
     # Initialize session states
@@ -558,24 +621,20 @@ def main():
     # Main chat area
     st.header("ASA Medical Assistant")
     
-    # Create a container for chat messages
-    chat_container = st.container()
-    
-    with chat_container:
-        # Display the chat history
-        if st.session_state.chat_history:
-            for msg_pair in st.session_state.chat_history:
-                # User message
-                if "user" in msg_pair and msg_pair["user"]:
-                    with st.chat_message("user"):
-                        st.write(msg_pair["user"])
-                # Assistant message
-                if "assistant" in msg_pair and msg_pair["assistant"]:
-                    with st.chat_message("assistant"):
-                        st.markdown(msg_pair["assistant"])
-        else:
-            # Intro if chat_history is empty
-            st.info("Welcome to ASA Medical Assistant! How can I help you today?")
+    # Display the chat history
+    if st.session_state.chat_history:
+        for msg_pair in st.session_state.chat_history:
+            # User message
+            if "user" in msg_pair and msg_pair["user"]:
+                with st.chat_message("user"):
+                    st.write(msg_pair["user"])
+            # Assistant message
+            if "assistant" in msg_pair and msg_pair["assistant"]:
+                with st.chat_message("assistant"):
+                    st.markdown(msg_pair["assistant"])
+    else:
+        # Intro if chat_history is empty
+        st.info("Welcome to ASA Medical Assistant! How can I help you today?")
     
     # Chat input at the bottom
     prompt = st.chat_input("Enter your medical query...")
