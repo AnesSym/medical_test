@@ -1,671 +1,343 @@
 import streamlit as st
-from groq import Groq
-import os
-import pandas as pd
-from datetime import datetime
-from io import BytesIO
-import time
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-
-# ReportLab imports for PDF generation
-from reportlab.lib.pagesizes import LETTER, inch
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import (
-    Paragraph, 
-    SimpleDocTemplate, 
-    Spacer, 
-    Table, 
-    TableStyle
+from helpers import (
+    get_next_api_key, 
+    get_groq_client, 
+    get_assistant_response, 
+    create_patient_intake_form,
+    get_diagnostic_analysis, 
+    create_medical_report, 
+    get_medical_assistant_response, 
+    check_medical_alerts, 
+    convert_md_to_html, 
+    strip_before_marker, 
+    generate_pdf_report, 
+    get_special_response, 
+    send_feedback_email,
+    process_stream_with_format_enforcement,
+    API_KEYS
 )
-
-# Load environment variables
-
-# Initialize list of API keys
-API_KEYS = [
-    "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",
-    "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",
-    "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"
-]
+import uuid
+from datetime import datetime
+from streamlit_option_menu import option_menu
 
 # Add key rotation counter to session state
 if "api_key_index" not in st.session_state:
     st.session_state.api_key_index = 0
 
-def get_next_api_key():
-    """Rotate through API keys"""
-    current_key = API_KEYS[st.session_state.api_key_index]
-    st.session_state.api_key_index = (st.session_state.api_key_index + 1) % len(API_KEYS)
-    return current_key
-
-# Replace the static client initialization with a function
-def get_groq_client():
-    """Get Groq client with next API key"""
-    return Groq(api_key=get_next_api_key())
-
-def get_assistant_response(prompt, chat_history):
-    client = get_groq_client()  # Get client with next API key
-    # Prepare messages including chat history
-    messages = [
-        {"role": "system", "content": "You are a helpful and knowledgeable Medical assistant."}
-    ]
-    
-    # Add chat history to messages
-    for message in chat_history:
-        if "user" in message:
-            messages.append({"role": "user", "content": message["user"]})
-        if "assistant" in message:
-            messages.append({"role": "assistant", "content": message["assistant"]})
-    
-    # Add current user prompt
-    messages.append({"role": "user", "content": prompt})
-    
-    # Get response from Groq
-    chat_completion = client.chat.completions.create(
-        messages=messages,
-        model="llama3-70b-8192",  # adjust if needed
-        temperature=0.5,
-        max_tokens=500,
-        top_p=1,
-        stream=False
-    )
-    
-    return chat_completion.choices[0].message.content
-
-def create_patient_intake_form():
-    st.header("Patient Intake Form")
-    
-    # Demographics Section
-    st.subheader("Demographics")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        patient_name = st.text_input("Patient Name")
-        age = st.number_input("Age", min_value=0, max_value=120)
-        gender = st.selectbox("Gender", ["Select", "Male", "Female", "Other"])
-    
-    with col2:
-        height = st.number_input("Height (cm)", min_value=0.0)
-        weight = st.number_input("Weight (kg)", min_value=0.0)
-        date = st.date_input("Date of Visit", datetime.now())
-
-    # Medical History Section
-    st.subheader("Medical History")
-    medical_conditions = st.multiselect(
-        "Known Medical Conditions",
-        ["Diabetes", "Hypertension", "Heart Disease", "Asthma", "Cancer", "None"],
-        default=["None"]
-    )
-    
-    medications = st.text_area("Current Medications (one per line)")
-    allergies = st.text_area("Known Allergies (one per line)")
-
-    # Symptoms Section
-    st.subheader("Current Symptoms")
-    symptoms = st.text_area("Please describe current symptoms")
-    
-    # File Upload
-    st.subheader("Medical Records")
-    uploaded_files = st.file_uploader(
-        "Upload relevant medical records (lab results, imaging, etc.)", 
-        accept_multiple_files=True
-    )
-
-    # Vitals Section
-    st.subheader("Vitals")
-    col3, col4 = st.columns(2)
-    
-    with col3:
-        temperature = st.number_input("Temperature (°C)", min_value=35.0, max_value=43.0, value=37.0)
-        heart_rate = st.number_input("Heart Rate (bpm)", min_value=0, max_value=220)
-    
-    with col4:
-        bp_systolic = st.number_input("Blood Pressure - Systolic", min_value=0, max_value=250)
-        bp_diastolic = st.number_input("Blood Pressure - Diastolic", min_value=0, max_value=200)
-        oxygen_saturation = st.number_input("Oxygen Saturation (%)", min_value=0, max_value=100, value=98)
-
-    # Submit Button
-    if st.button("Submit Patient Data"):
-        # Create a dictionary of all patient data
-        patient_data = {
-            "name": patient_name,
-            "age": age,
-            "gender": gender,
-            "height": height,
-            "weight": weight,
-            "date": date,
-            "medical_conditions": medical_conditions,
-            "medications": medications,
-            "allergies": allergies,
-            "symptoms": symptoms,
-            "temperature": temperature,
-            "heart_rate": heart_rate,
-            "blood_pressure": f"{bp_systolic}/{bp_diastolic}",
-            "oxygen_saturation": oxygen_saturation
-        }
-        
-        # Store in session state
-        if "patient_records" not in st.session_state:
-            st.session_state.patient_records = []
-        
-        st.session_state.patient_records.append(patient_data)
-        st.success("Patient data submitted successfully!")
-        
-        return patient_data
-    
-    return None
-
-def get_diagnostic_analysis(patient_data):
-    client = get_groq_client()  # Get client with next API key
-    # Prepare a comprehensive prompt for the LLM
-    prompt = f"""As a medical AI assistant, please analyze the following patient information and provide 
-potential diagnoses and recommendations.
-The analysis should be in the form of a medical report. and should be short and concise.
-If the input data appears to be erroneous or incomplete, respond professionally indicating the issue.
-if there is some data that looks like it is not correct based on other data, respond professionally indicating the issue.
-Patient Details:
-- Age: {patient_data['age']}
-- Gender: {patient_data['gender']}
-- Current Symptoms: {patient_data['symptoms']}
-- Medical History: {', '.join(patient_data['medical_conditions'])}
-- Current Medications: {patient_data['medications']}
-- Allergies: {patient_data['allergies']}
-- Vitals:
-  * Temperature: {patient_data['temperature']}°C
-  * Heart Rate: {patient_data['heart_rate']} bpm
-  * Blood Pressure: {patient_data['blood_pressure']}
-  * Oxygen Saturation: {patient_data['oxygen_saturation']}%
-
-Please provide:
-1. which department or specialist the user should contact (e.g., Cardiology, Neurology, Infectious Diseases, etc.).
-
-Note: This is AI-generated and does not replace professional medical judgment.
-"""
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a knowledgeable medical AI assistant providing professional analysis."
-        },
-        {"role": "user", "content": prompt}
-    ]
-    
-    chat_completion = client.chat.completions.create(
-        messages=messages,
-        model="llama3-70b-8192",
-        temperature=0.3,
-        max_tokens=500,
-        top_p=1,
-        stream=False
-    )
-    
-    return chat_completion.choices[0].message.content
-
-def create_medical_report(patient_data, analysis):
-    """
-    A simple text-based report (if you still want text output).
-    """
-    current_date = datetime.now().strftime("%d/%m/%Y")
-    
-    report = f"""
-MEDICAL REPORT
-Date of Report: {current_date}
-=======================================================
-
-PATIENT INFORMATION (Status Praesens)
------------------------------------
-Name: {patient_data['name']}
-Date of Visit: {patient_data['date']}
-Gender: {patient_data['gender']}
-Age: {patient_data['age']} years
-Height: {patient_data['height']} cm
-Weight: {patient_data['weight']} kg
-
-VITAL SIGNS (Signa Vitalia)
---------------------------
-Temperature: {patient_data['temperature']}°C
-Blood Pressure: {patient_data['blood_pressure']} mmHg
-Heart Rate: {patient_data['heart_rate']} bpm
-O₂ Saturation: {patient_data['oxygen_saturation']}%
-
-MEDICAL HISTORY (Anamnesis)
--------------------------
-Known Conditions (Status Morbi): 
-{', '.join(patient_data['medical_conditions'])}
-
-Current Medications (Medicatio Actualis):
-{patient_data['medications'] or 'None reported'}
-
-Allergies (Allergiae):
-{patient_data['allergies'] or 'None reported'}
-
-CURRENT SYMPTOMS (Symptomata)
----------------------------
-{patient_data['symptoms']}
-
-ANALYSIS AND ASSESSMENT
----------------------
-{analysis}
-
--------------------
-NOTICE: This report includes AI-assisted analysis and should be reviewed by a licensed medical professional.
-Generated via Medical Assistant System
-"""
-    return report
-
-def get_medical_assistant_response(prompt, chat_history, patient_data=None):
-    client = get_groq_client()  # Get client with next API key
-    # Updated system prompt with focus only on triage and department referral
-    system_prompt = (
-        "You are an advanced medical AI triage assistant for ASA bolnica in Bosnia and Herzegovina. "
-        "Your role is to help patients with their initial medical inquiries and direct them "
-        "to the appropriate departments within ASA bolnica. "
-        "Keep your responses short, clear, and well-structured.\n\n"
-        
-        "When gathering information, format your response like this:\n\n"
-        "**Reported Symptoms:**\n"
-        "• [Symptom] - [Duration] - [Severity]\n"
-        "• [Symptom] - [Duration] - [Severity]\n\n"
-        "**Additional Information Needed:**\n"
-        "[List your follow-up questions here]\n\n"
-        
-        "CRITICAL SCREENING QUESTIONS - Include these when relevant:\n"
-        "• \"Is this the worst headache of your life?\" (Critical for brain hemorrhage detection)\n"
-        "• \"Any new rash, bullseye marks, or purple spots?\" (For infectious or allergic conditions)\n"
-        "• \"Any weakness, numbness, or trouble speaking?\" (For stroke or neurological conditions)\n"
-        "• \"Have you experienced these symptoms before?\" (To distinguish new vs. chronic conditions)\n"
-        "• \"Does medication relieve your symptoms?\" (To assess severity and treatment response)\n"
-        "• \"Any recent travel or tick exposure?\" (For infectious disease risk)\n\n"
-        
-        "Only when you have gathered ALL necessary information about the symptoms, "
-        "provide your final response in this format:\n\n"
-        "**Reported Symptoms:**\n"
-        "• [Symptom] - [Duration] - [Severity]\n"
-        "• [Symptom] - [Duration] - [Severity]\n\n"
-        "**Red Flags Identified:**\n"
-        "[List any truly concerning features requiring urgent attention, or 'None' if no red flags]\n\n"
-        "**Recommendation:**\n"
-        "[Simply state which department at ASA bolnica would be appropriate]\n\n"
-        "---\n"
-        "**Urgency Level:**\n"
-        "• EMERGENCY: Seek immediate emergency care (only for truly life-threatening conditions)\n"
-        "• URGENT: Seek medical attention within 24 hours\n"
-        "• STANDARD: Schedule an appointment within 1-2 weeks\n"
-        "• ROUTINE: Next available regular appointment\n"
-        "---\n\n"
-        
-        "Important guidelines:\n"
-        "1. BE CONSERVATIVE WITH URGENCY LEVELS - Do not over-triage common symptoms\n"
-        "2. For common issues like neck pain, headache, minor joint pain, or mild symptoms, use STANDARD or ROUTINE levels\n"
-        "3. Reserve URGENT only for significant symptoms like persistent high fever, severe pain, etc.\n"
-        "4. Reserve EMERGENCY only for truly life-threatening situations (stroke symptoms, severe breathing difficulty, etc.)\n"
-        "5. DO NOT offer any diagnosis or suggest potential medical concerns - this is the doctor's role\n"
-        "6. Only recommend department referral and urgency level\n"
-        "7. Do not suggest hospital visits for common issues like muscle pain from poor sleep\n"
-        "8. For musculoskeletal pain without red flags, recommend ROUTINE appointments\n"
-        "9. Keep responses concise and professional\n"
-        "10. Do not provide diagnosis - only department referrals\n"
-        "11. Use bullet points (•) for listing symptoms\n"
-        "12. Remember you are representing ASA bolnica in Bosnia and Herzegovina"
-    )
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    # Add patient context if available
-    if patient_data:
-        patient_context = (
-            f"Current patient context:\n"
-            f"- Name: {patient_data['name']}\n"
-            f"- Age: {patient_data['age']}\n"
-            f"- Gender: {patient_data['gender']}\n"
-            f"- Vitals: BP {patient_data['blood_pressure']}, "
-            f"HR {patient_data['heart_rate']}, Temp {patient_data['temperature']}°C\n"
-            f"- Current Symptoms: {patient_data['symptoms']}"
-        )
-        messages.append({"role": "system", "content": patient_context})
-    
-    # Add chat history to the conversation
-    for message in chat_history:
-        if "user" in message:
-            messages.append({"role": "user", "content": message["user"]})
-        if "assistant" in message:
-            messages.append({"role": "assistant", "content": message["assistant"]})
-    
-    # Add current prompt
-    messages.append({"role": "user", "content": prompt})
-    
-    return client.chat.completions.create(
-        messages=messages,
-        model="llama3-70b-8192",
-        temperature=0.9,
-        max_tokens=1024,
-        top_p=1,
-        stream=True  # Enable streaming
-    )
-
-def check_medical_alerts(text):
-    """Check for emergency medical conditions in the text"""
-    emergency_keywords = [
-        "stroke", "heart attack", "myocardial infarction", "sepsis", 
-        "anaphylaxis", "pulmonary embolism", "meningitis", "acute",
-        "immediate", "emergency", "urgent", "critical"
-    ]
-    
-    has_emergency = any(keyword in text.lower() for keyword in emergency_keywords)
-    return has_emergency
-
-# ========== NEW PDF GENERATION FUNCTION ==========
-import re
-import re
-
-def convert_md_to_html(md_text: str) -> str:
-    """
-    Naive conversion of Markdown-like text:
-      - Replace **bold** markers with <b>...</b>
-      - Replace line breaks with <br/>
-    """
-    # Convert **bold** to <b>...</b>
-    html_text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', md_text)
-    # Replace line breaks with <br/>
-    html_text = html_text.replace('\n', '<br/>')
-    return html_text
-
-def strip_before_marker(text: str, marker: str = "**Analysis**") -> str:
-    """
-    Return only the substring starting at the given 'marker'.
-    Case-insensitive. If marker not found, returns the original text.
-    """
-    text_lower = text.lower()
-    marker_lower = marker.lower()
-    
-    idx = text_lower.find(marker_lower)
-    if idx != -1:
-        # Keep everything from the marker onward
-        return text[idx:]
-    else:
-        return text
-
-
-def generate_pdf_report(patient_data, analysis):
-    """
-    Generate a styled PDF medical report using ReportLab and return it as a BytesIO object.
-    This version only includes everything under the '**Analysis**' marker.
-    """
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=LETTER,
-        rightMargin=72,
-        leftMargin=72,
-        topMargin=72,
-        bottomMargin=72
-    )
-
-    elements = []
-    
-    # Grab some built-in styles (feel free to customize)
-    styles = getSampleStyleSheet()
-    title_style = styles["Title"]
-    heading_style = styles["Heading2"]
-    normal_style = styles["BodyText"]
-    
-    # ---- Title ----
-    elements.append(Paragraph("MEDICAL REPORT", title_style))
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # ---- Date of Report ----
-    report_date = datetime.now().strftime("%d/%m/%Y")
-    elements.append(Paragraph(f"<b>Date of Report:</b> {report_date}", normal_style))
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # ---- Patient Information ----
-    elements.append(Paragraph("PATIENT INFORMATION (Status Praesens)", heading_style))
-    patient_info_table_data = [
-        ["Name:", patient_data['name']],
-        ["Date of Visit:", str(patient_data['date'])],
-        ["Gender:", patient_data['gender']],
-        ["Age:", str(patient_data['age'])],
-        ["Height:", f"{patient_data['height']} cm"],
-        ["Weight:", f"{patient_data['weight']} kg"],
-    ]
-    patient_info_table = Table(patient_info_table_data)
-    patient_info_table.hAlign = 'LEFT'
-    patient_info_table.setStyle(TableStyle([
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('BACKGROUND', (0,0), (1,0), colors.grey),
-        ('TEXTCOLOR', (0,0), (1,0), colors.whitesmoke),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-    ]))
-    elements.append(patient_info_table)
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # ---- Vital Signs ----
-    elements.append(Paragraph("VITAL SIGNS (Signa Vitalia)", heading_style))
-    vitals_table_data = [
-        ["Temperature:", f"{patient_data['temperature']} °C"],
-        ["Blood Pressure:", patient_data['blood_pressure']],
-        ["Heart Rate:", f"{patient_data['heart_rate']} bpm"],
-        ["O2 Saturation:", f"{patient_data['oxygen_saturation']} %"],
-    ]
-    vitals_table = Table(vitals_table_data)
-    vitals_table.hAlign = 'LEFT'
-    vitals_table.setStyle(TableStyle([
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('BACKGROUND', (0,0), (1,0), colors.grey),
-        ('TEXTCOLOR', (0,0), (1,0), colors.whitesmoke),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-    ]))
-    elements.append(vitals_table)
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # ---- Medical History ----
-    elements.append(Paragraph("MEDICAL HISTORY (Anamnesis)", heading_style))
-    known_conditions = ', '.join(patient_data['medical_conditions'])
-    med_history_text = f"""
-    <b>Known Conditions (Status Morbi):</b> {known_conditions}<br/>
-    <b>Current Medications (Medicatio Actualis):</b> {patient_data['medications'] or 'None reported'}<br/>
-    <b>Allergies (Allergiae):</b> {patient_data['allergies'] or 'None reported'}
-    """
-    elements.append(Paragraph(med_history_text, normal_style))
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # ---- Current Symptoms ----
-    elements.append(Paragraph("CURRENT SYMPTOMS (Symptomata)", heading_style))
-    elements.append(Paragraph(patient_data['symptoms'], normal_style))
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # ---- Analysis and Assessment ----
-    # 1) Strip out everything before "**Analysis**" in your raw text from the LLM
-    cleaned_analysis = strip_before_marker(analysis, "**Potential Diagnoses:**")
-    # 2) Convert from MD-like text to HTML
-    parsed_analysis = convert_md_to_html(cleaned_analysis)
-    
-    elements.append(Paragraph("ANALYSIS AND ASSESSMENT", heading_style))
-    elements.append(Paragraph(parsed_analysis, normal_style))
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # ---- Disclaimer ----
-    disclaimer = (
-        "NOTICE: This report includes AI-assisted analysis and should be "
-        "reviewed by a licensed medical professional."
-    )
-    elements.append(Paragraph(disclaimer, styles["Italic"]))
-    
-    # Build the PDF
-    doc.build(elements)
-    
-    # Retrieve the PDF from buffer
-    pdf_data = buffer.getvalue()
-    buffer.close()
-    return pdf_data
-
-def get_special_response(prompt_type, chat_history):
-    client = get_groq_client()  # Get client with next API key
-    """Handle special response types like clinical reasoning and medical literature"""
-    
-    special_prompts = {
-        "clinical_reasoning": (
-            "Based on our conversation so far, here is my clinical reasoning process:\n\n"
-            "1. Review the reported symptoms and their characteristics\n"
-            "2. Consider the timeline and progression\n"
-            "3. Evaluate risk factors and severity\n"
-            "4. Determine appropriate specialist referral\n\n"
-            "Please explain your clinical reasoning process for the previous recommendation."
-        ),
-        "medical_literature": (
-            "Based on the symptoms and conditions discussed, please provide relevant medical "
-            "literature references and guidelines that support your recommendation. Include "
-            "standard medical guidelines and protocols where applicable."
-        )
+# Initialize conversation management session states
+if "conversations" not in st.session_state:
+    st.session_state.conversations = {}
+if "current_conversation_id" not in st.session_state:
+    new_id = str(uuid.uuid4())
+    st.session_state.conversations[new_id] = {
+        "chat_history": [],
+        "created_at": datetime.now().strftime("%b %d, %I:%M %p"),
+        "title": "New Conversation"
     }
-    
-    # Get the appropriate prompt
-    system_prompt = (
-        "You are a medical AI assistant. Provide a detailed but concise response "
-        "focusing specifically on {prompt_type}. Reference established medical "
-        "guidelines and literature where appropriate. Keep the response professional "
-        "and evidence-based."
-    )
-    
-    messages = [
-        {"role": "system", "content": system_prompt},
-        # Add the conversation history
-        *[msg for msg in chat_history if msg.get("assistant") and "Summary" not in msg.get("assistant")],
-        # Add the special prompt
-        {"role": "user", "content": special_prompts[prompt_type]}
-    ]
-    
-    return client.chat.completions.create(
-        messages=messages,
-        model="llama3-70b-8192",
-        temperature=0.5,
-        max_tokens=1024,
-        top_p=1,
-        stream=True
-    )
+    st.session_state.current_conversation_id = new_id
 
-def send_feedback_email(chat_history, feedback_text):
-    """Send feedback via email"""
-    # Email configuration
-    sender_email = os.getenv('FEEDBACK_EMAIL')
-    sender_password = os.getenv('FEEDBACK_EMAIL_PASSWORD')
-    receiver_email = os.getenv('FEEDBACK_EMAIL')  # Same as sender in this case
-    
-    if not all([sender_email, sender_password, receiver_email]):
-        st.error("Email configuration is missing. Please check environment variables.")
-        return False
-        
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = f"Medical Assistant Feedback - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        
-        # Format the chat history
-        chat_summary = "\n".join([
-            f"User: {msg.get('user', '')}\nAssistant: {msg.get('assistant', '')}"
-            for msg in chat_history
-        ])
-        
-        # Create email body
-        body = f"""
-New Feedback Received:
+# Initialize patient data session states
+if "patient_records" not in st.session_state:
+    st.session_state.patient_records = []
+if "patient_analyses" not in st.session_state:
+    st.session_state.patient_analyses = {}
 
-Feedback:
-{feedback_text}
+def create_new_conversation():
+    """Create a new conversation and set it as current"""
+    new_id = str(uuid.uuid4())
+    st.session_state.conversations[new_id] = {
+        "chat_history": [],
+        "created_at": datetime.now().strftime("%b %d, %I:%M %p"),
+        "title": "New Conversation"
+    }
+    st.session_state.current_conversation_id = new_id
 
-Chat History:
-{chat_summary}
-        """
+def set_current_conversation(conversation_id):
+    """Set the current conversation to the selected one"""
+    st.session_state.current_conversation_id = conversation_id
+
+def delete_conversation(conversation_id):
+    """Delete a conversation"""
+    if conversation_id in st.session_state.conversations:
+        # If deleting current conversation, switch to another one first
+        if conversation_id == st.session_state.current_conversation_id:
+            # Find another conversation to switch to
+            remaining_ids = [cid for cid in st.session_state.conversations.keys() if cid != conversation_id]
+            if remaining_ids:
+                st.session_state.current_conversation_id = remaining_ids[0]
+            else:
+                # Create a new conversation if we're deleting the last one
+                create_new_conversation()
         
-        msg.attach(MIMEText(body, 'plain'))
-        
-        # Create SMTP session
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(sender_email, sender_password)
-            server.send_message(msg)
-            
-        return True
-    except Exception as e:
-        st.error(f"Error sending feedback: {str(e)}")
-        return False
+        # Delete the conversation
+        del st.session_state.conversations[conversation_id]
 
 def main():
     # Set page config
     st.set_page_config(
         page_title="ASA Medical Assistant",
         page_icon="🏥",
-        layout="centered",  # Back to centered layout
+        layout="centered",
         initial_sidebar_state="expanded"
     )
     
-    # Initialize session states
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    if "patient_records" not in st.session_state:
-        st.session_state.patient_records = []
-    if "patient_analyses" not in st.session_state:
-        st.session_state.patient_analyses = {}
-
-    # Main chat area
-    st.header("ASA Medical Assistant")
+    # Add custom CSS for styling
+    st.markdown("""
+    <style>
+    /* ASA BOLNICA branding */
+    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+    @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
+    
+    /* Sidebar styling */
+    div[data-testid="stSidebarContent"] {
+        background-color: #003B7A;
+        color: white;
+    }
+    
+    /* Button styling */
+    .stButton button {
+        width: 100%;
+        border-radius: 6px !important;
+        height: 44px;
+        background-color: #0055AA !important;
+        color: white !important;
+        border: 1px solid #0066CC !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: 'Roboto', sans-serif;
+        font-weight: 500;
+    }
+    .stButton button:hover {
+        background-color: #0066CC !important;
+    }
+    
+    /* Option menu styling */
+    .st-emotion-cache-16txtl3 h1 {
+        font-size: 14px !important;
+        color: #E0E0E0 !important;
+        font-weight: 500 !important;
+        padding-left: 10px !important;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        font-family: 'Roboto', sans-serif;
+    }
+    
+    /* Conversation ID styling */
+    .conv-id {
+        font-weight: bold;
+        color: #FFFFFF;
+    }
+    
+    .conv-time {
+        font-size: 0.8em;
+        color: #CCDDEE;
+    }
+    
+    /* Header styling */
+    h1 {
+        color: #003B7A !important;
+        font-family: 'Roboto', sans-serif;
+        font-weight: 700;
+    }
+    
+    /* Chat container */
+    div[data-testid="stChatMessageContent"] {
+        background-color: #E6EEF8;
+        border-radius: 8px;
+        padding: 10px;
+    }
+    
+    /* Assistant chat bubbles */
+    .stChatMessage[data-testid="stChatMessageContent"] {
+        background-color: #E6EEF8;
+    }
+    
+    /* User chat bubbles */
+    .stChatMessage[data-testid="user"] > div {
+        background-color: #003B7A;
+        color: white;
+    }
+    
+    /* Chat input box */
+    div[data-testid="stChatInput"] > div {
+        border-color: #003B7A;
+    }
+    
+    /* ASA BOLNICA logo styling for header */
+    .logo-header {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 20px;
+    }
+    .logo-header img {
+        height: 60px;
+    }
+    
+    /* Material icons in buttons */
+    .material-icons {
+        font-size: 16px;
+        margin-right: 8px;
+        vertical-align: middle;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # Sidebar for conversation history
+    with st.sidebar:
+        # Logo in sidebar
+        st.markdown("""
+        <div style="text-align:center; margin-bottom:20px; margin-top:10px;">
+            <h2 style="color:white; font-family:'Roboto',sans-serif; font-weight:700; margin-bottom:5px;">ASA BOLNICA</h2>
+            <p style="color:#CCDDEE; font-size:14px; margin-top:0;">Medical Assistant</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # New conversation button at top
+        if st.button('New chat', type="secondary", key="new_chat_btn"):
+            create_new_conversation()
+            st.rerun()
+        
+        st.divider()
+        
+        # Simple sorting by ID (most recent first)
+        sorted_conversations = sorted(
+            st.session_state.conversations.items(),
+            key=lambda x: x[1]["created_at"],
+            reverse=True
+        )
+        
+        # Prepare lists for option menu
+        conv_list = []
+        conv_ids = []
+        
+        for conv_id, conv_data in sorted_conversations:
+            # Get a short conversation ID (first 6 characters)
+            short_id = conv_id[:6]
+            
+            # Format creation time
+            creation_time = conv_data["created_at"]
+            
+            # Create simple text-based title
+            title = f"#{short_id} • {creation_time}"
+            
+            conv_list.append(title)
+            conv_ids.append(conv_id)
+        
+        # Display conversations
+        if conv_list:
+            selected_index = 0
+            if st.session_state.current_conversation_id in conv_ids:
+                selected_index = conv_ids.index(st.session_state.current_conversation_id)
+            
+            # Show conversation menu
+            selected_conversation = option_menu(
+                menu_title="Conversations",
+                options=conv_list,
+                icons=["chat-left-text"] * len(conv_list),  # Using Bootstrap icons
+                default_index=selected_index,
+                orientation="vertical",
+                styles={
+                    "container": {"padding": "0!important", "background-color": "#003B7A"},
+                    "icon": {"color": "#FFFFFF", "font-size": "16px"},
+                    "nav-link": {
+                        "font-size": "14px", 
+                        "text-align": "left", 
+                        "margin": "3px 0", 
+                        "--hover-color": "#0055AA", 
+                        "white-space": "normal",
+                        "height": "auto",
+                        "padding": "10px 15px",
+                        "color": "#FFFFFF",
+                        "border-radius": "6px",
+                        "font-family": "'Roboto', sans-serif"
+                    },
+                    "nav-link-selected": {"background-color": "#0055AA", "color": "#FFFFFF"},
+                    "menu-title": {"color": "#CCDDEE", "font-size": "12px", "font-weight": "500", "margin-top": "12px", "margin-bottom": "5px", "font-family": "'Roboto', sans-serif"}
+                }
+            )
+            
+            # Set the current conversation based on selection
+            selected_index = conv_list.index(selected_conversation)
+            selected_conv_id = conv_ids[selected_index]
+            if selected_conv_id != st.session_state.current_conversation_id:
+                set_current_conversation(selected_conv_id)
+                st.rerun()
+        
+        # Bottom section for delete button
+        st.markdown("<div style='position: fixed; bottom: 20px; width: 85%;'>", unsafe_allow_html=True)
+        
+        # Delete conversation button
+        if st.session_state.conversations and len(st.session_state.conversations) > 1:
+            if st.button('Delete chat', type="secondary"):
+                delete_conversation(st.session_state.current_conversation_id)
+                st.rerun()
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Main chat area with header
+    st.markdown("""
+    <div class="logo-header">
+        <h1>ASA Medical Assistant</h1>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Get current conversation data
+    current_chat_history = st.session_state.conversations[st.session_state.current_conversation_id]["chat_history"]
+    
+    # Create a container for chat messages
+    chat_container = st.container()
     
     # Display the chat history
-    if st.session_state.chat_history:
-        for msg_pair in st.session_state.chat_history:
-            # User message
-            if "user" in msg_pair and msg_pair["user"]:
-                with st.chat_message("user"):
-                    st.write(msg_pair["user"])
-            # Assistant message
-            if "assistant" in msg_pair and msg_pair["assistant"]:
-                with st.chat_message("assistant"):
-                    st.markdown(msg_pair["assistant"])
-    else:
-        # Intro if chat_history is empty
-        st.info("Welcome to ASA Medical Assistant! How can I help you today?")
+    with chat_container:
+        if current_chat_history:
+            for msg_pair in current_chat_history:
+                # User message
+                if "user" in msg_pair and msg_pair["user"]:
+                    with st.chat_message("user", avatar=":material/face:"):
+                        st.markdown(msg_pair["user"])
+                
+                # Assistant message
+                if "assistant" in msg_pair and msg_pair["assistant"]:
+                    with st.chat_message("assistant", avatar=":material/health_and_safety:"):
+                        # Use markdown rendering explicitly to handle the structured format
+                        st.markdown(msg_pair["assistant"])
+        else:
+            # Intro if chat_history is empty
+            with st.chat_message("assistant", avatar=":material/health_and_safety:"):
+                st.markdown("Welcome to ASA Medical Assistant! How can I help you today?")
     
     # Chat input at the bottom
     prompt = st.chat_input("Enter your medical query...")
     if prompt:
         # Add user message to chat history and rerun to show it immediately
-        st.session_state.chat_history.append({"user": prompt})
+        current_chat_history.append({"user": prompt})
         st.rerun()
 
     # Check if we need to generate a response
-    if st.session_state.chat_history and "user" in st.session_state.chat_history[-1]:
-        last_message = st.session_state.chat_history[-1]
+    if current_chat_history and "user" in current_chat_history[-1]:
+        last_message = current_chat_history[-1]
         if "assistant" not in last_message:  # Only respond if we haven't already
             # Create a placeholder for the streaming response
-            with st.chat_message("assistant"):
+            with st.chat_message("assistant", avatar=":material/health_and_safety:"):
                 message_placeholder = st.empty()
-                full_response = ""
                 
-                # Stream the response
-                for chunk in get_medical_assistant_response(
+                # Process streaming response
+                response_stream = get_medical_assistant_response(
                     last_message["user"],
-                    st.session_state.chat_history
-                ):
-                    if chunk.choices[0].delta.content is not None:
-                        full_response += chunk.choices[0].delta.content
-                        message_placeholder.markdown(full_response + "▌")
+                    current_chat_history
+                )
                 
-                # Update the placeholder with the complete response
-                message_placeholder.markdown(full_response)
-            
-            # Add the complete response to chat history
-            st.session_state.chat_history[-1]["assistant"] = full_response
+                # Process the streaming response with format enforcement
+                formatted_response = process_stream_with_format_enforcement(
+                    response_stream, 
+                    message_placeholder
+                )
+                
+                # Add the formatted response to chat history
+                current_chat_history[-1]["assistant"] = formatted_response
+                
+                # No longer update conversation title based on first message
 
 if __name__ == "__main__":
     main()
